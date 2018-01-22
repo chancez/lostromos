@@ -20,6 +20,8 @@ import (
 	"github.com/ghodss/yaml"
 	"github.com/wpengine/lostromos/metrics"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -39,7 +41,7 @@ type Controller struct {
 	Wait           bool           // Whether or not to wait for resources during Update and Install before marking a release successful
 	WaitTimeout    int64          // time in seconds to wait for kubernetes resources to be created before marking a release successful
 	logger         *zap.SugaredLogger
-	kubeClient     kubernetes.Interface
+	KubeClient     kubernetes.Interface
 	resourceClient dynamic.ResourceInterface
 }
 
@@ -60,7 +62,7 @@ func NewController(chartDir, ns, rn, host string, wait bool, waitto int64, logge
 		Wait:           wait,
 		WaitTimeout:    waitto,
 		resourceClient: resourceClient,
-		kubeClient:     kubeClient,
+		KubeClient:     kubeClient,
 		logger:         logger,
 	}
 	return c
@@ -122,23 +124,39 @@ func (c Controller) installOrUpdate(r *unstructured.Unstructured) error {
 	}
 
 	rlsName := c.releaseName(r)
+	// TODO: should we set configmap owner references before install/update, in
+	// case we're in a state where release install/upgrade is continuously
+	// failing?
+
 	if c.releaseExists(rlsName) {
+		c.logger.Infow("upgrading release", "release", rlsName)
 		_, err = c.Helm.UpdateRelease(
 			rlsName,
 			c.ChartDir,
 			helm.UpdateValueOverrides(cr),
 			helm.UpgradeWait(c.Wait),
 			helm.UpgradeTimeout(c.WaitTimeout))
+	} else {
+		c.logger.Infow("installing release", "release", rlsName)
+		_, err = c.Helm.InstallRelease(
+			c.ChartDir,
+			c.Namespace,
+			helm.ReleaseName(rlsName),
+			helm.ValueOverrides(cr),
+			helm.InstallWait(c.Wait),
+			helm.InstallTimeout(c.WaitTimeout))
+	}
+	if err != nil {
 		return err
 	}
-	_, err = c.Helm.InstallRelease(
-		c.ChartDir,
-		c.Namespace,
-		helm.ReleaseName(rlsName),
-		helm.ValueOverrides(cr),
-		helm.InstallWait(c.Wait),
-		helm.InstallTimeout(c.WaitTimeout))
-	return err
+
+	c.logger.Infow("setting release configmap OwnerReferences", "release", rlsName)
+	err = c.setReleaseConfigMapOwnerReferences(r)
+	if err != nil {
+		c.logger.Errorw("failed to set release configmap OwnerReferences", "error", err, "release", rlsName)
+		return err
+	}
+	return nil
 }
 
 func (c Controller) marshallCR(r *unstructured.Unstructured) ([]byte, error) {
@@ -149,6 +167,46 @@ func (c Controller) marshallCR(r *unstructured.Unstructured) ([]byte, error) {
 			"spec":      r.Object["spec"]}}
 
 	return yaml.Marshal(re)
+}
+
+func (c Controller) setReleaseConfigMapOwnerReferences(r *unstructured.Unstructured) error {
+	rlsName := c.releaseName(r)
+	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"OWNER": "TILLER",
+			"NAME":  rlsName,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	opts := metav1.ListOptions{
+		LabelSelector: selector.String(),
+	}
+	helmReleaseConfigMaps, err := c.KubeClient.CoreV1().ConfigMaps(c.Namespace).List(opts)
+	if err != nil {
+		return err
+	}
+
+	for _, releaseCM := range helmReleaseConfigMaps.Items {
+		obj, err := meta.Accessor(&releaseCM)
+		if err != nil {
+			return err
+		}
+		if metav1.IsControlledBy(obj, r) {
+			continue
+		}
+		controllerRef := metav1.NewControllerRef(r, r.GroupVersionKind())
+		ownerRefs := []metav1.OwnerReference{
+			*controllerRef,
+		}
+		releaseCM.SetOwnerReferences(ownerRefs)
+		_, err = c.KubeClient.CoreV1().ConfigMaps(c.Namespace).Update(&releaseCM)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c Controller) releaseExists(rlsName string) bool {

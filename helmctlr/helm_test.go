@@ -21,18 +21,26 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wpengine/lostromos/helmctlr"
 	"github.com/wpengine/lostromos/metrics"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/helm/pkg/proto/hapi/release"
 	"k8s.io/helm/pkg/proto/hapi/services"
 )
 
 var (
+	// TODO: Get rid of globals and use a helper function to create these per
+	// test, to avoid shared state/mocks.
 	testController  = helmctlr.NewController("../test/data/chart", "lostromos-test", "lostromostest", "0", false, 30, nil, nil, nil)
 	testReleaseName = "lostromostest-dory"
 	testResource    = &unstructured.Unstructured{
 		Object: map[string]interface{}{
+			"kind":       "Character",
+			"apiVersion": "stable.nicolerenee.io",
 			"metadata": map[string]interface{}{
 				"name": "dory",
 			},
@@ -41,6 +49,17 @@ var (
 				"From": "Finding Nemo",
 				"By":   "Disney",
 			},
+		},
+	}
+	testHelmReleaseConfigmap = &v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testReleaseName,
+			Namespace: testController.Namespace,
+			Labels: map[string]string{
+				"OWNER": "TILLER",
+				"NAME":  testReleaseName,
+			},
+			UID: "1234",
 		},
 	}
 )
@@ -124,6 +143,10 @@ func TestResourceAddedHappyPath(t *testing.T) {
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
 	testController.Helm = mockHelm
+
+	k8sClient := fake.NewSimpleClientset(testHelmReleaseConfigmap)
+	testController.KubeClient = k8sClient
+
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(&services.ListReleasesResponse{}, nil)
 	installOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()}
@@ -137,6 +160,28 @@ func TestResourceAddedHappyPath(t *testing.T) {
 	assertCounters(t, ct, func() {
 		testController.ResourceAdded(testResource)
 	})
+
+	// Ensure helm configMap owner references get set
+	cmList, err := k8sClient.CoreV1().ConfigMaps(testController.Namespace).List(metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, cmList.Items, 1)
+	ownerRefs := cmList.Items[0].GetOwnerReferences()
+	assert.Len(t, ownerRefs, 1)
+
+	tru := true
+	apiVersion := testResource.GetAPIVersion()
+	kind := testResource.GetKind()
+	name := testResource.GetName()
+	uid := testResource.GetUID()
+	expectedOwnerRefs := metav1.OwnerReference{
+		APIVersion:         apiVersion,
+		Kind:               kind,
+		Name:               name,
+		UID:                uid,
+		Controller:         &tru,
+		BlockOwnerDeletion: &tru,
+	}
+	assert.Equal(t, expectedOwnerRefs, ownerRefs[0])
 }
 
 // Happy path when resource exists...happens on startup
@@ -145,6 +190,10 @@ func TestResourceAddedHappyPathExists(t *testing.T) {
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
 	testController.Helm = mockHelm
+
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
+
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	res := &services.ListReleasesResponse{
 		Count: int64(1),
@@ -170,6 +219,8 @@ func TestResourceAddedListErrorStillSuccessful(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(nil, errors.New("Broken"))
@@ -191,6 +242,8 @@ func TestResourceAddedInstallErrors(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(&services.ListReleasesResponse{}, nil)
@@ -211,6 +264,8 @@ func TestResourceAddedUpdateErrors(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	res := &services.ListReleasesResponse{
@@ -235,6 +290,8 @@ func TestResourceDeleted(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	deleteOpts := []interface{}{gomock.Any()}
 	mockHelm.EXPECT().DeleteRelease(testReleaseName, deleteOpts...)
@@ -254,6 +311,8 @@ func TestResourceDeletedWhenDeleteFails(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	deleteOpts := []interface{}{gomock.Any()}
 	mockHelm.EXPECT().DeleteRelease(testReleaseName, deleteOpts...).Return(nil, errors.New("delete failed"))
@@ -270,6 +329,8 @@ func TestResourceUpdatedHappyPath(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(&services.ListReleasesResponse{}, nil)
@@ -290,6 +351,8 @@ func TestResourceUpdatedHappyPathExists(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	res := &services.ListReleasesResponse{
@@ -315,6 +378,8 @@ func TestResourceUpdatedListErrorStillSuccessful(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(nil, errors.New("Broken"))
@@ -335,6 +400,8 @@ func TestResourceUpdatedInstallErrors(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	mockHelm.EXPECT().ListReleases(listOpts...).Return(&services.ListReleasesResponse{}, nil)
@@ -355,6 +422,8 @@ func TestResourceUpdatedUpdateErrors(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	defer mockCtrl.Finish()
 	mockHelm := NewMockInterface(mockCtrl)
+	k8sClient := fake.NewSimpleClientset()
+	testController.KubeClient = k8sClient
 	testController.Helm = mockHelm
 	listOpts := []interface{}{gomock.Any(), gomock.Any(), gomock.Any()}
 	res := &services.ListReleasesResponse{
