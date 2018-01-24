@@ -31,6 +31,8 @@ import (
 
 var defaultNS = "default"
 
+const tillerOwnerLabelValue = "TILLER"
+
 // Controller is a crwatcher.ResourceController that works with Helm to deploy
 // helm charts into K8s providing a CustomResource as value data to the charts
 type Controller struct {
@@ -173,7 +175,7 @@ func (c Controller) setReleaseConfigMapOwnerReferences(r *unstructured.Unstructu
 	rlsName := c.releaseName(r)
 	selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
 		MatchLabels: map[string]string{
-			"OWNER": "TILLER",
+			"OWNER": tillerOwnerLabelValue,
 			"NAME":  rlsName,
 		},
 	})
