@@ -126,9 +126,17 @@ func (c Controller) installOrUpdate(r *unstructured.Unstructured) error {
 	}
 
 	rlsName := c.releaseName(r)
-	// TODO: should we set configmap owner references before install/update, in
-	// case we're in a state where release install/upgrade is continuously
-	// failing?
+
+	// We set OwnerReferences on any configmaps missing them before we do a
+	// helm install/upgrade, in case we fail multiple times in a row, which
+	// causes release configmaps to be created, but will prevent the
+	// setReleaseConfigMapOwnerReferences from happening below.
+	c.logger.Infow("setting release configmap OwnerReferences", "release", rlsName)
+	err = c.setReleaseConfigMapOwnerReferences(r)
+	if err != nil {
+		c.logger.Errorw("failed to set release configmap OwnerReferences", "error", err, "release", rlsName)
+		return err
+	}
 
 	if c.releaseExists(rlsName) {
 		c.logger.Infow("upgrading release", "release", rlsName)
