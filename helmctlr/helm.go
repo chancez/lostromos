@@ -43,7 +43,7 @@ type Controller struct {
 	Wait           bool           // Whether or not to wait for resources during Update and Install before marking a release successful
 	WaitTimeout    int64          // time in seconds to wait for kubernetes resources to be created before marking a release successful
 	logger         *zap.SugaredLogger
-	KubeClient     kubernetes.Interface
+	kubeClient     kubernetes.Interface
 	resourceClient dynamic.ResourceInterface
 }
 
@@ -64,7 +64,7 @@ func NewController(chartDir, ns, rn, host string, wait bool, waitto int64, logge
 		Wait:           wait,
 		WaitTimeout:    waitto,
 		resourceClient: resourceClient,
-		KubeClient:     kubeClient,
+		kubeClient:     kubeClient,
 		logger:         logger,
 	}
 	return c
@@ -193,7 +193,7 @@ func (c Controller) setReleaseConfigMapOwnerReferences(r *unstructured.Unstructu
 	opts := metav1.ListOptions{
 		LabelSelector: selector.String(),
 	}
-	helmReleaseConfigMaps, err := c.KubeClient.CoreV1().ConfigMaps(c.Namespace).List(opts)
+	helmReleaseConfigMaps, err := c.kubeClient.CoreV1().ConfigMaps(c.Namespace).List(opts)
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func (c Controller) setReleaseConfigMapOwnerReferences(r *unstructured.Unstructu
 			*controllerRef,
 		}
 		releaseCM.SetOwnerReferences(ownerRefs)
-		_, err = c.KubeClient.CoreV1().ConfigMaps(c.Namespace).Update(&releaseCM)
+		_, err = c.kubeClient.CoreV1().ConfigMaps(c.Namespace).Update(&releaseCM)
 		if err != nil {
 			return err
 		}
